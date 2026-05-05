@@ -1,0 +1,128 @@
+# configs/module1.yaml
+# ═══════════════════════════════════════════════
+# EXPERIMENT
+# ═══════════════════════════════════════════════
+experiment:
+  name: module1_news_factorization
+  seed: 42
+  device: cuda
+
+
+# ═══════════════════════════════════════════════
+# DATA
+# ═══════════════════════════════════════════════
+data:
+  train_path: datasets/module1/train_module1.csv
+  val_path:   datasets/module1/val_module1.csv
+  test_path:  datasets/module1/test_module1.csv
+
+  max_len: 128
+  max_news: 8
+  use_mock_srl: false
+
+  dataloader:
+    batch_size: 8
+    num_workers: 2
+    pin_memory: true
+
+  sampler:
+    use_weighted: true   # WeightedRandomSampler
+
+
+# ═══════════════════════════════════════════════
+# MODEL
+# ═══════════════════════════════════════════════
+model:
+  name: NewsFactorizationModule
+
+  model_name: hfl/chinese-roberta-wwm-ext
+  hidden_size: 768
+
+  num_classes: 3
+  mlp_hidden: 256
+  dropout: 0.5
+
+  # sẽ infer từ data nếu để null
+  num_factors: null  
+
+  label_smoothing: 0.2
+
+
+# ═══════════════════════════════════════════════
+# TRAINING
+# ═══════════════════════════════════════════════
+training:
+  epochs: 15
+  patience: 3
+
+  lambda_div: 0.05
+  lambda_entropy: 0.01
+
+  bert_warmup_epochs: 4
+
+  grad_clip: 0.3
+
+  rdrop:
+    enabled: true
+    alpha: 0.5   # weight KL loss
+
+  logging:
+    log_alpha: true
+    print_every: 1
+
+
+# ═══════════════════════════════════════════════
+# OPTIMIZER
+# ═══════════════════════════════════════════════
+optimizer:
+  name: AdamW
+
+  bert_lr: 5e-6
+  head_lr: 5e-4
+  alpha_lr: 5e-4
+
+  weight_decay: 1e-2
+
+
+# ═══════════════════════════════════════════════
+# SCHEDULER
+# ═══════════════════════════════════════════════
+scheduler:
+  name: cosine_with_warmup
+  type: LambdaLR
+
+
+# ═══════════════════════════════════════════════
+# CHECKPOINT
+# ═══════════════════════════════════════════════
+checkpoint:
+  path: checkpoint.pt
+  resume: true
+  save_best_path: best_news_factorization.pt
+
+  monitor: val_loss
+  mode: min
+
+
+# ═══════════════════════════════════════════════
+# EVALUATION
+# ═══════════════════════════════════════════════
+evaluation:
+  metrics:
+    - accuracy
+    - precision
+    - recall
+    - f1
+
+  average: macro   # quan trọng vì imbalance
+
+
+# ═══════════════════════════════════════════════
+# EXPORT
+# ═══════════════════════════════════════════════
+export:
+  enable: true
+
+  train_output: sdpg_features_train.csv
+  val_output:   sdpg_features_val.csv
+  test_output:  sdpg_features_test.csv
