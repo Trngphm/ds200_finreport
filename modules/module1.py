@@ -79,23 +79,48 @@ class SRLFeatureExtractor(nn.Module):
 #      quan hệ V-A0, V-A1 và A0-A1
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# class SDPGEdgeBuilder(nn.Module):
+#     def __init__(self, hidden_size: int):
+#         super().__init__()
+#         # 3 projections riêng biệt — mỗi cái học 1 loại quan hệ ngữ nghĩa khác nhau
+#         self.proj_VA0  = nn.Linear(2 * hidden_size, hidden_size, bias=False)
+#         self.proj_VA1  = nn.Linear(2 * hidden_size, hidden_size, bias=False)
+#         self.proj_A0A1 = nn.Linear(2 * hidden_size, hidden_size, bias=False)
+
+#     def forward(self, e_V, e_A0, e_A1):
+#         """
+#         Input shape: (B*N_max, H) mỗi tensor.
+#         Output: G_VA0, G_VA1, G_A0A1, e_SDPG — mỗi cái (B*N_max, H).
+#         """
+#         G_VA0  = self.proj_VA0 (torch.cat([e_V,  e_A0], dim=-1))
+#         G_VA1  = self.proj_VA1 (torch.cat([e_V,  e_A1], dim=-1))
+#         G_A0A1 = self.proj_A0A1(torch.cat([e_A0, e_A1], dim=-1))
+#         e_SDPG = torch.stack([G_VA0, G_VA1, G_A0A1], dim=1).mean(dim=1)
+#         return G_VA0, G_VA1, G_A0A1, e_SDPG
+
 class SDPGEdgeBuilder(nn.Module):
+    """
+    Paper: G_AB là edge feature giữa 2 roles trong semantic dependency graph.
+    Dùng hadamard product (element-wise multiply) + projection để giữ
+    tính đối xứng và đúng tinh thần dependency graph.
+    """
     def __init__(self, hidden_size: int):
         super().__init__()
-        # 3 projections riêng biệt — mỗi cái học 1 loại quan hệ ngữ nghĩa khác nhau
-        self.proj_VA0  = nn.Linear(2 * hidden_size, hidden_size, bias=False)
-        self.proj_VA1  = nn.Linear(2 * hidden_size, hidden_size, bias=False)
-        self.proj_A0A1 = nn.Linear(2 * hidden_size, hidden_size, bias=False)
+        # Projection sau hadamard để học ngữ nghĩa của từng loại edge
+        self.proj_VA0  = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.proj_VA1  = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.proj_A0A1 = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.act = nn.Tanh()
 
     def forward(self, e_V, e_A0, e_A1):
         """
-        Input shape: (B*N_max, H) mỗi tensor.
-        Output: G_VA0, G_VA1, G_A0A1, e_SDPG — mỗi cái (B*N_max, H).
+        e_V, e_A0, e_A1: (B*N_max, H)
+        Hadamard product giữ đặc trưng tương tác, projection học edge type.
         """
-        G_VA0  = self.proj_VA0 (torch.cat([e_V,  e_A0], dim=-1))
-        G_VA1  = self.proj_VA1 (torch.cat([e_V,  e_A1], dim=-1))
-        G_A0A1 = self.proj_A0A1(torch.cat([e_A0, e_A1], dim=-1))
-        e_SDPG = torch.stack([G_VA0, G_VA1, G_A0A1], dim=1).mean(dim=1)
+        G_VA0  = self.act(self.proj_VA0 (e_V  * e_A0))   # (B*N_max, H)
+        G_VA1  = self.act(self.proj_VA1 (e_V  * e_A1))
+        G_A0A1 = self.act(self.proj_A0A1(e_A0 * e_A1))
+        e_SDPG = (G_VA0 + G_VA1 + G_A0A1) / 3
         return G_VA0, G_VA1, G_A0A1, e_SDPG
 
 
@@ -138,8 +163,11 @@ class NewsFactorizationModule(nn.Module):
         # W_news  ∈ (0,1): scale chung cho toàn bộ news features
         # W_factor∈ (0,1): scale chung cho toàn bộ factor features
         # → gradient cân bằng hơn
-        self.W_news_logit   = nn.Parameter(torch.zeros(1))   # sigmoid → 0.5
-        self.W_factor_logit = nn.Parameter(torch.zeros(1))   # sigmoid → 0.5
+        # self.W_news_logit   = nn.Parameter(torch.zeros(1))   # sigmoid → 0.5
+        # self.W_factor_logit = nn.Parameter(torch.zeros(1))   # sigmoid → 0.5
+        
+        self.W_alpha = nn.Parameter(torch.ones(self._total_feat_dim))
+
 
         # Vẫn giữ W_alpha (6H+F,) để tương thích export / alpha_stats
         # nhưng không dùng trong forward nữa
@@ -166,35 +194,53 @@ class NewsFactorizationModule(nn.Module):
 
     # ── Alpha stats (for logging) ──────────────────────────────────────────────
 
+    # def get_alpha_stats(self):
+    #     w_news   = torch.sigmoid(self.W_news_logit).item()
+    #     w_factor = torch.sigmoid(self.W_factor_logit).item()
+    #     return w_news, w_factor
+    
     def get_alpha_stats(self):
-        w_news   = torch.sigmoid(self.W_news_logit).item()
-        w_factor = torch.sigmoid(self.W_factor_logit).item()
-        return w_news, w_factor
+        w = torch.sigmoid(self.W_alpha)
+        news_w   = w[:6*self.hidden_size].mean().item()
+        factor_w = w[6*self.hidden_size:].mean().item()
+        return news_w, factor_w
 
     # ── Build X (Eq. 4) ───────────────────────────────────────────────────────
 
+    # def _build_X(self, x_cols, stock_factors, N_max):
+    #     """
+    #     Eq.(4): X = W_α ⊙ [X_n ; X_f]
+
+    #     FIX: dùng 2 scalar gates riêng (W_news, W_factor) thay vì
+    #          1 vector (6H+F,) để tránh gradient mất cân bằng khi 6H >> F.
+
+    #     x_cols       : (B, N_max, 6H)
+    #     stock_factors: (B, F)
+    #     """
+    #     B = x_cols.size(0)
+
+    #     # Factor: LayerNorm → expand
+    #     factors_normed = self.factor_norm(stock_factors)              # (B, F)
+    #     X_f = factors_normed.unsqueeze(1).expand(B, N_max, self.num_factors)  # (B, N_max, F)
+
+    #     # Gate
+    #     w_n = torch.sigmoid(self.W_news_logit)    # scalar ∈ (0,1)
+    #     w_f = torch.sigmoid(self.W_factor_logit)  # scalar ∈ (0,1)
+
+    #     X = torch.cat([x_cols * w_n, X_f * w_f], dim=-1)   # (B, N_max, 6H+F)
+    #     return X
+    
     def _build_X(self, x_cols, stock_factors, N_max):
-        """
-        Eq.(4): X = W_α ⊙ [X_n ; X_f]
-
-        FIX: dùng 2 scalar gates riêng (W_news, W_factor) thay vì
-             1 vector (6H+F,) để tránh gradient mất cân bằng khi 6H >> F.
-
-        x_cols       : (B, N_max, 6H)
-        stock_factors: (B, F)
-        """
         B = x_cols.size(0)
-
-        # Factor: LayerNorm → expand
-        factors_normed = self.factor_norm(stock_factors)              # (B, F)
-        X_f = factors_normed.unsqueeze(1).expand(B, N_max, self.num_factors)  # (B, N_max, F)
-
-        # Gate
-        w_n = torch.sigmoid(self.W_news_logit)    # scalar ∈ (0,1)
-        w_f = torch.sigmoid(self.W_factor_logit)  # scalar ∈ (0,1)
-
-        X = torch.cat([x_cols * w_n, X_f * w_f], dim=-1)   # (B, N_max, 6H+F)
+        factors_normed = self.factor_norm(stock_factors)
+        X_f = factors_normed.unsqueeze(1).expand(B, N_max, self.num_factors)
+        
+        X_cat = torch.cat([x_cols, X_f], dim=-1)          # (B, N_max, 6H+F)
+        w = torch.sigmoid(self.W_alpha)                     # (6H+F,) per-dim gating
+        X = X_cat * w.unsqueeze(0).unsqueeze(0)            # broadcast
         return X
+
+    
 
     # ── Encoder (dùng cho cả forward và export) ────────────────────────────────
 
@@ -239,16 +285,17 @@ class NewsFactorizationModule(nn.Module):
         # Eq. (5): y_n = Softmax(MLP(X[:, n]))  — per-news prediction
         # FIX: aggregate AFTER softmax (mean of probs), không phải mean of logits
         logits_per_news = self.mlp(X)                                        # (B, N_max, C)
-        probs_per_news  = F.softmax(logits_per_news, dim=-1)                 # (B, N_max, C)
+        
+        masked_logits = (logits_per_news * mask).sum(dim=1) \
+                / mask.sum(dim=1).clamp(min=1) 
+                
+        probs  = F.softmax(masked_logits, dim=-1)                 # (B, N_max, C)
 
-        # Masked mean aggregate → final probs (B, C)
-        probs  = (probs_per_news * mask).sum(dim=1) \
-                 / mask.sum(dim=1).clamp(min=1)
         # logits giả để dùng với CrossEntropyLoss (log của probs)
-        logits = torch.log(probs.clamp(min=1e-8))
+        # logits = torch.log(probs.clamp(min=1e-8))
 
         return {
-            "logits":  logits,
+            "logits":  masked_logits,  # (B, C) — dùng để tính loss
             "probs":   probs,
             "eV":      eV,
             "eA0":     eA0,

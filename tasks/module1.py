@@ -38,10 +38,8 @@ class Module1Trainer:
 
         # FIX: model._encode trả về log(probs) làm "logits"
         # → dùng NLLLoss thay vì CrossEntropyLoss để tránh double-softmax
-        self.criterion_train = nn.NLLLoss(
-            label_smoothing=model.label_smoothing
-        )
-        self.criterion_eval = nn.NLLLoss()
+        self.criterion_train = nn.CrossEntropyLoss(label_smoothing=getattr(cfg.model, 'label_smoothing', 0.0))
+        self.criterion_eval  = nn.CrossEntropyLoss()
 
     # ═══════════════════════════════════════════════════════════════════════
     # TRAIN
@@ -61,16 +59,31 @@ class Module1Trainer:
             logits1, probs1 = self.model(ids, masks, srl, counts, factors)
             logits2, probs2 = self.model(ids, masks, srl, counts, factors)
 
-            # Task loss — logits đã là log(probs) nên dùng NLLLoss
+            # Task loss
+            # task_loss = (
+            #     self.criterion_train(logits1, labels) +
+            #     self.criterion_train(logits2, labels)
+            # ) / 2
             task_loss = (
                 self.criterion_train(logits1, labels) +
                 self.criterion_train(logits2, labels)
             ) / 2
 
             # KL divergence (R-Drop) — tính trực tiếp trên log_probs
+            # kl_loss = (
+            #     F.kl_div(logits1, probs2, reduction='batchmean') +
+            #     F.kl_div(logits2, probs1, reduction='batchmean')
+            # ) / 2
+            
+            # KL-div: cần log_probs cho input, probs cho target
+            log_probs1 = F.log_softmax(logits1, dim=-1)
+            log_probs2 = F.log_softmax(logits2, dim=-1)
+            probs1 = F.softmax(logits1, dim=-1)
+            probs2 = F.softmax(logits2, dim=-1)
+
             kl_loss = (
-                F.kl_div(logits1, probs2, reduction='batchmean') +
-                F.kl_div(logits2, probs1, reduction='batchmean')
+                F.kl_div(log_probs1, probs2, reduction='batchmean') +
+                F.kl_div(log_probs2, probs1, reduction='batchmean')
             ) / 2
 
             # Diversity regularization trên W_alpha gates

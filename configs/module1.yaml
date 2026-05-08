@@ -96,9 +96,9 @@ scheduler:
 # CHECKPOINT
 # ═══════════════════════════════════════════════
 checkpoint:
-  path: checkpoint.pt
+  path: checkpoints/module1/checkpoint.pt
   resume: true
-  save_best_path: best_news_factorization.pt
+  save_best_path: checkpoints/module1/best_news_factorization.pt
 
   monitor: val_loss
   mode: min
